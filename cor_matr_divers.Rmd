@@ -1,0 +1,565 @@
+---
+title: "cor_matr_divers"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+These are the libraries we need.
+
+```{r}
+library(dplyr)
+library(rvest)# web scraping
+library(tidyverse) # plot
+library(boot) # bootstrapping
+library(igraph) # graphs
+library(energy) # distance correlation 
+library(GoFKernel) 
+require(foreach, quietly = TRUE)
+require(doParallel, quietly = TRUE)
+
+```
+
+In this project we want to perform an analysis on the stocks we get from the *S&P500 index*. In particular we want to find out if the firms of the same sectors interact with each other, i.e. if they follow the same trend. 
+
+## Getting the dataset
+
+We find all the informations we need on wikipedia site *"https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"*. In particular we take *Symbol*, *Security*, *GICS Sector* and *GICS Sub Industry* and import it as a *tibble* dataframe. 
+
+```{r, results = 'hide'}
+# we find the companies in wikipedia
+sp_500_wiki <- read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies") %>%
+  html_node("table.wikitable") %>%
+  html_table() %>%
+  select(`Symbol`, Security, `GICS Sector`, `GICS Sub Industry`) %>%
+  as_tibble() 
+
+```
+
+The next step is to retrieve the financial data from the *Yahoo! Finance* portal.
+
+We want to perform the analysis on the relative prices whose formula was defined by Bordin starting from the closing price at a given day:
+
+$x_{t,j} = log(\frac{c_{t,j}}{c_{t-1,j}})$ 
+
+With these values we build the matrix $X_{hat} = [x_{t,j}]_{t,j}$ where $j$ is the index of the stock and $c_{j,t}$ is its closing price.
+
+
+```{r}
+
+SP500_index <- sp_500_wiki[[1]]
+
+require(tseries, quietly = TRUE)
+
+firm_vector <- c()
+
+for (firm in SP500_index) try({
+  
+  hist_quote = suppressWarnings(get.hist.quote(instrument = firm, start = "2003-01-01", 
+                                       end = "2008-01-01", quote = c("Open", "Close"), 
+                                       provider = "yahoo", drop = TRUE))
+
+  hist_quote$trfm_price = diff(log(hist_quote$Close))
+
+  assign(firm, hist_quote$trfm_price[-1,])
+  
+  firm_vector <- c(firm_vector, firm)
+})
+```
+
+In order to work with the correlation we check if there are some *Na* values: in this case we remove the entire column otherwise it could give some problems.
+
+```{r}
+merging <- lapply(firm_vector, get)
+merge  = do.call('merge', merging)
+names(merge) = firm_vector
+
+# we remove the columns with some NA values
+merge <- merge[ ,colSums(is.na(merge)) == 0]
+```
+
+## Getting the sample
+
+We want to work with the companies and their corresponding *'GICS sector'* so, applying the *group_by* function, we can take a sample of five companies per sector, thus we have *55* firms and *11* sectors: 'Communication Service', 'Consumer Discretionary', 'Consumer Staples', 'Energy', 'Financials', 'Health Care', 'Industrials', 'Information Technology', 'Materials', 'Real Estate', 'Utilities'.
+
+```{r}
+samp_symbols <- sp_500_wiki[sp_500_wiki$Symbol %in% colnames(merge),] %>%
+  # we want a sample of 5 companies for each sector
+  group_by(`GICS Sector`) %>%
+  sample_n(5) #%>%
+
+samp_symbols
+```
+
+We can build the matrix *X_hat* with the time series on the rows and the companies on the columns.
+
+```{r}
+symbols <- samp_symbols$Symbol
+
+X_hat <- merge[, symbols]
+```
+
+
+## Computing correlation matrix
+
+Now we want to compute the correlation matrix of *X_{hat}*: we define a function that, given a matrix, returns the corresponding correlation matrix (calculated with *Pearson* method). To do this we use the built-in **cor** function that takes in input a matrix and returns the correlation one. Then we recall the *generate_corr_matr* on *X_{hat}* to get the *R_{hat}* matrix.
+
+```{r}
+
+R_hat = matrix(NA, nrow = 55, ncol = 55)
+
+generate_corr_matr = function(X_hat, R_hat){
+
+  R_hat = cor(X_hat)
+  
+return(R_hat)
+
+}
+
+R_hat = generate_corr_matr(X_hat, R_hat)
+
+```
+
+Now we want to implement the bootstrap procedure on *X_{hat}* by (randomly) choosing rows from it. In order to make this process faster we decided to use the *foreach* parallelization scheme. We want *1000* replicates and again apply the *generate_corr_matr* function to get the correlation matrices. Finally we can compute the maximum of the distance $\Delta_b$ between *R_hat* and the boostraped replicates:
+
+$\Delta_b = \sqrt{n} max|\hat{R}_b^*-\hat{R}|$
+
+obtaining the *$\Delta_b$* vector.
+
+
+```{r}
+num_cores <- detectCores() 
+
+cl <- makeCluster(num_cores)  
+
+registerDoParallel(cl)
+
+a <- Sys.time()
+
+B = 1000 # number of replicates
+
+delta_P = NULL
+
+delta_P <- foreach(b = 1 : B, .combine=c) %dopar% {
+
+  X_star <- matrix(NA, nrow = 1257, ncol = 55)
+
+  idx = sample(1:1257, replace = TRUE)
+
+  R_star =  matrix(NA, nrow = 55, ncol = 55 )
+
+  for (i in 1:length(X_hat[,1])){
+    
+      X_star[i,] = X_hat[idx[i],] # bootstrap sample
+
+      
+  }
+
+  R_star = generate_corr_matr(X_star, R_star)
+
+  sqrt(1257) * max(abs(R_star - R_hat))
+
+}
+
+stopCluster(cl)
+b <- Sys.time()
+
+print(b-a)
+
+```
+
+
+
+Let's make a visualization of the *$\Delta_P$* vector *empirical cumulative distribution function*.
+
+```{r}
+
+# bootstrap ECDF
+F_hat_P = ecdf(delta_P)
+
+plot(F_hat_P, main = "ECDF")
+
+```
+
+Now we can build the adjacency matrix. In order to do this we take the confidence level to use its link with statistical tests: in detail the null hypothesis $H_0$ says that there is no edge {i,j} while the alternative one $H_1$ says that there's and edge ${i,j}$.
+
+```{r}
+
+# confidence Level
+alpha = 0.05
+
+inv <- inverse(F_hat_P, 0, 25718774)
+t_alpha <- inv(1-alpha)
+
+t_alpha
+
+```
+
+So we're ready to fill the adjacency matrix: we define a value of $\epsilon$ and see wheter it's in the confidence interval or outside. More to the point we put an edge when $|\rho|\geq \epsilon$, i.e. when $\rho \not \in [-\epsilon, \epsilon]$. Starting from $\epsilon = 0$, we put an edge if the CI doesn't contain the $0$ and then we repeat the analysis for $\epsilon = (0.35, 0.3, 0.25, 0.5)$.
+
+```{r}
+# adjacency matrix
+new_cor_matr  <- matrix(0, nrow = 55, ncol = 55)
+
+generate_adj_matr = function(R_hat, t_alpha, epsilon){
+  for (i in 1 : 55){
+  for (j in 1 : 55){
+    low <- R_hat[i,j] - t_alpha/sqrt(1257)
+    up <- R_hat[i,j] + t_alpha/sqrt(1257)
+    
+    if ((epsilon <= low) && (epsilon <= low)){
+
+       new_cor_matr[i,j] <- 1
+       new_cor_matr[j,i] <- 1
+       
+    }
+    
+    if ((-epsilon >= up) && (epsilon >= up)){
+
+       new_cor_matr[i,j] <- 1
+       new_cor_matr[j,i] <- 1
+       
+    }
+  }
+  
+  }
+  return(new_cor_matr)
+}
+
+
+adj_matr <- generate_adj_matr(R_hat, t_alpha, 0.35)
+adj_matr1 <- generate_adj_matr(R_hat, t_alpha, 0.3)
+adj_matr2 <- generate_adj_matr(R_hat, t_alpha, 0.25)
+adj_matr3 <- generate_adj_matr(R_hat, t_alpha, 0.2)
+adj_matr4 <- generate_adj_matr(R_hat, t_alpha, 0)
+```
+
+
+```{r}
+# counting how many 1 in the matrices
+count <- 0
+for (i in 1 : 55){
+  for (j in 1 : 55){
+    if (adj_matr1[i,j] ==1){
+      count <- count + 1
+    }
+  }
+}
+count
+    
+```
+
+
+Now we have the adjacency matrices so we can make a visualization. In order to do this we use the **igraph** package. In the graphs each node represents a stock and each color (eleven different colors) a different sector. 
+
+```{r}
+# defining a palette of colors
+color_vec <- c('cyan3', 'red', 'blue', 'yellow', 'pink', 'chocolate1', 'aquamarine', 'green', 'burlywood1', 'cornsilk3', 'grey')
+
+# define the GICS sectors vector
+GICS_sec <- c('Communication Service', 'Consumer Discretionary', 'Consumer Staples', 'Energy', 'Financials', 'Health Care', 'Industrials', 'Information Technology', 'Materials', 'Real Estate', 'Utilities')
+
+```
+
+
+```{r}
+# drawing undirected graph
+
+drawing_graph <- function(adj_matr){
+  
+  return(graph_from_adjacency_matrix(adj_matr, mode = "undirected", diag = FALSE, weighted = TRUE))
+  
+}
+
+```
+
+From the plot it's shown how the graph varies in response to $\epsilon$ value changes.
+
+```{r}
+
+gr <- drawing_graph(adj_matr)
+V(gr)$color = rep(color_vec, each = 5)
+
+gr1 <- drawing_graph(adj_matr1)
+V(gr1)$color = rep(color_vec, each = 5)
+
+gr2 <- drawing_graph(adj_matr2)
+V(gr2)$color = rep(color_vec, each = 5)
+
+gr3 <- drawing_graph(adj_matr3)
+V(gr3)$color = rep(color_vec, each = 5)
+
+gr4 <- drawing_graph(adj_matr4)
+V(gr4)$color = rep(color_vec, each = 5)
+
+par(c(5, 2))
+
+plot(gr, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+
+plot(gr1, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+
+plot(gr2, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+
+plot(gr3, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+
+plot(gr4, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+```
+
+As we can see from the plot with $\epsilon = 0.35$ some clusters are shown as well as some isolated nodes. In particular Energy, Financial, Industrial and Utilities cluster together so we can deduce that the stocks inside these sectors follow the same trend in changing price.
+
+With the decrease of $\epsilon$ value more correlations are shown: the correlations mentioned above are intensified. Furthermore correlations occur between different sectors: Communication service, Materials and Real estate cluster with each other and with the previous ones. 
+
+In general the plots show that sectors such as Consumer Discretionary, Consumer Staples, Health Care and Information Technology have isolated nodes. 
+
+At the end we can see that given $\epsilon = 0$ the adjacency matrix is composed only by ones with the result that the plot show that all the firms are correlated and the graph is complete. 
+
+-----------------------------------------2013-2018----------------------------
+
+
+
+
+```{r}
+require(tseries, quietly = TRUE)
+
+firm_vector2 <- c()
+
+for (firm2 in colnames(X_hat)) try({
+  
+  hist_quote = suppressWarnings(get.hist.quote(instrument = firm2, start = "2013-01-01", 
+                                       end = "2018-01-01", quote = c("Open", "Close"), 
+                                       provider = "yahoo", drop = TRUE))
+  # creating the new variable 
+  hist_quote$trfm_price = diff(log(hist_quote$Close))
+  # and giving it a name
+  assign(firm2, hist_quote$trfm_price[-1,])
+  firm_vector2 <- c(firm_vector2, firm2)
+  
+})
+```
+
+
+
+```{r}
+merging2 <- lapply(firm_vector2, get)
+merge2  = do.call('merge', merging2)
+names(merge2) = firm_vector2
+# we remove the columns with some NA values
+merge2 <- merge2[ ,colSums(is.na(merge2)) == 0]
+View(head(merge2))
+```
+
+
+
+```{r}
+symbols <- samp_symbols$Symbol
+
+X_hat2 <- merge2[, symbols]
+```
+
+```{r}
+View(X_hat2)
+```
+
+## Computing correlation matrix
+
+```{r}
+
+R_hat2 = matrix(NA, nrow = 55, ncol = 55)
+
+R_hat2 = generate_corr_matr(X_hat2, R_hat2)
+
+```
+
+
+```{r}
+num_cores <- detectCores() 
+
+cl <- makeCluster(num_cores)  
+
+registerDoParallel(cl)
+
+a <- Sys.time()
+
+B = 1000 # number of replicates
+
+delta_P2 = NULL
+
+delta_P2 <- foreach(b = 1 : B, .combine=c) %dopar% {
+
+  X_star2 <- matrix(NA, nrow = 1258, ncol = 55)
+
+  idx = sample(1:1258, replace = TRUE)
+
+  R_star2 =  matrix(NA, nrow = 55, ncol = 55 )
+
+  for (i in 1:length(X_hat2[,1])){
+    
+      X_star2[i,] = X_hat2[idx[i],]
+      
+  }
+
+  R_star2 = generate_corr_matr(X_star2, R_star2)
+
+  sqrt(1258) * max(abs(R_star2 - R_hat2))
+
+}
+
+stopCluster(cl)
+b <- Sys.time()
+
+print(b-a)
+
+```
+
+
+```{r}
+delta_P2
+```
+
+
+
+```{r}
+
+F_hat_P2 = ecdf(delta_P2)
+
+plot(F_hat_P2, main = "ECDF")
+
+```
+
+
+
+```{r}
+alpha = 0.05
+# Bootstrap / Normal CI / 95%
+inv2 <- inverse(F_hat_P2, 0, 25718774)
+t_alpha2 <- inv(1-alpha)
+t_alpha2
+```
+
+
+```{r}
+# adjacency matrix
+new_cor_matr2  <- matrix(0, nrow = 55, ncol = 55)
+
+generate_adj_matr2 = function(R_hat2, t_alpha2, epsilon){
+  for (i in 1 : 55){
+  for (j in 1 : 55){
+    low2 <- R_hat2[i,j] - t_alpha2/sqrt(1258)
+    up2 <- R_hat2[i,j] + t_alpha2/sqrt(1258)
+    
+    if ((-epsilon <= low2) & (epsilon <= low2)){
+
+       new_cor_matr2[i,j] <- 1
+       new_cor_matr2[j,i] <- 1
+       
+    }
+    
+    if ((-epsilon >= up2) & (epsilon >= up2)){
+
+       new_cor_matr2[i,j] <- 1
+       new_cor_matr2[j,i] <- 1
+    }
+  }
+  
+  
+  }
+  return(new_cor_matr2)
+}
+
+
+adj_matr_ <- generate_adj_matr2(R_hat2, t_alpha2, 0.35)
+adj_matr_1 <- generate_adj_matr2(R_hat2, t_alpha2, 0.3)
+adj_matr_2 <- generate_adj_matr2(R_hat2, t_alpha2, 0.25)
+adj_matr_3 <- generate_adj_matr2(R_hat2, t_alpha2, 0.2)
+adj_matr_4 <- generate_adj_matr2(R_hat2, t_alpha2, 0)
+```
+
+
+```{r}
+# counting how many 1 in the matrices
+count <- 0
+for (i in 1 : 55){
+  for (j in 1 : 55){
+    if (adj_matr4[i,j] ==1){
+      count <- count + 1
+    }
+  }
+}
+count
+    
+```
+
+
+```{r}
+# defining a palette of colors
+color_vec <- c('cyan3', 'red', 'blue', 'yellow', 'pink', 'chocolate1', 'aquamarine', 'green', 'burlywood1', 'cornsilk3', 'grey')
+
+# define the GICS sectors vector
+GICS_sec <- c('Communication Service', 'Consumer Discretionary', 'Consumer Staples', 'Energy', 'Financials', 'Health Care', 'Industrials', 'Information Technology', 'Materials', 'Real Estate', 'Utilities')
+
+```
+
+
+```{r}
+# drawing undirected graph
+
+drawing_graph <- function(adj_matr){
+  
+  return(graph_from_adjacency_matrix(adj_matr, mode = "undirected", diag = FALSE, weighted = TRUE))
+  
+}
+
+```
+
+
+```{r}
+
+gr_ <- drawing_graph(adj_matr_)
+V(gr_)$color = rep(color_vec, each = 5)
+
+gr_1 <- drawing_graph(adj_matr_1)
+V(gr_1)$color = rep(color_vec, each = 5)
+
+gr_2 <- drawing_graph(adj_matr_2)
+V(gr_2)$color = rep(color_vec, each = 5)
+
+gr_3 <- drawing_graph(adj_matr_3)
+V(gr_3)$color = rep(color_vec, each = 5)
+
+gr_4 <- drawing_graph(adj_matr_4)
+V(gr_4)$color = rep(color_vec, each = 5)
+
+par(c(5, 2))
+
+plot(gr_, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+
+plot(gr_1, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+
+plot(gr_2, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+
+plot(gr_3, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+
+plot(gr_4, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+```
+
+With respect to the years before the financial crisis we can observe that:
+- Energy, Materials and Utilities sectors mantain the same clustering trend;
+- Financials, Industrial and Real Estate cluster with each other starting from the highest $\epsilon$ value; 
+- Consumer Discretionary, Consumer Staples, Health Care and Information Technology have again isolated nodes starting from the highest $\epsilon$ value. 
+
+The biggest difference we notice between the two time windows is that there are more correlations among different sectors using high values of $\epsilon$ ($0.35$, $0.3$). Furthermore we can see that sectors such as Energy and Information Technology didn't follow the trends of the other sectors in the first period taken into account, but after the financial crisis they cluster with other firms of different branches. 
+
+
