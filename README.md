@@ -1,0 +1,1 @@
+# Gics_sector
