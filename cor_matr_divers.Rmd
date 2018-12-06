@@ -56,7 +56,7 @@ require(tseries, quietly = TRUE)
 
 firm_vector <- c()
 
-for (firm in SP500_index) try({
+invisible(capture.output (for (firm in SP500_index) try({
   
   hist_quote = suppressWarnings(get.hist.quote(instrument = firm, start = "2003-01-01", 
                                        end = "2008-01-01", quote = c("Open", "Close"), 
@@ -67,7 +67,7 @@ for (firm in SP500_index) try({
   assign(firm, hist_quote$trfm_price[-1,])
   
   firm_vector <- c(firm_vector, firm)
-})
+})))
 ```
 
 In order to work with the correlation we check if there are some *Na* values: in this case we remove the entire column otherwise it could give some problems.
@@ -238,20 +238,6 @@ adj_matr4 <- generate_adj_matr(R_hat, t_alpha, 0)
 ```
 
 
-```{r}
-# counting how many 1 in the matrices
-count <- 0
-for (i in 1 : 55){
-  for (j in 1 : 55){
-    if (adj_matr1[i,j] ==1){
-      count <- count + 1
-    }
-  }
-}
-count
-    
-```
-
 
 Now we have the adjacency matrices so we can make a visualization. In order to do this we use the **igraph** package. In the graphs each node represents a stock and each color (eleven different colors) a different sector. 
 
@@ -279,7 +265,6 @@ drawing_graph <- function(adj_matr){
 From the plot it's shown how the graph varies in response to $\epsilon$ value changes.
 
 ```{r}
-
 gr <- drawing_graph(adj_matr)
 V(gr)$color = rep(color_vec, each = 5)
 
@@ -313,13 +298,71 @@ plot(gr4, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label
 legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
 ```
 
-As we can see from the plot with $\epsilon = 0.35$ some clusters are shown as well as some isolated nodes. In particular Energy, Financial, Industrial and Utilities cluster together so we can deduce that the stocks inside these sectors follow the same trend in changing price.
+As we can see from the plot with $\epsilon = 0.35$ some clusters are shown as well as some isolated nodes. In particular Energy, Financial and Utilities cluster together so we can deduce that the stocks inside these sectors follow the same trend in changing price.
 
 With the decrease of $\epsilon$ value more correlations are shown: the correlations mentioned above are intensified. Furthermore correlations occur between different sectors: Communication service, Materials and Real estate cluster with each other and with the previous ones. 
 
 In general the plots show that sectors such as Consumer Discretionary, Consumer Staples, Health Care and Information Technology have isolated nodes. 
 
 At the end we can see that given $\epsilon = 0$ the adjacency matrix is composed only by ones with the result that the plot show that all the firms are correlated and the graph is complete. 
+
+
+## Distance correlation
+
+
+
+
+```{r}
+# distance covariance test 
+a <- Sys.time()
+p_matr_prova <- matrix(NA, nrow = 55, ncol = 55)
+for (i in 1:55){
+  for (j in 1:55){
+    if (j >= i){
+      dcov_test <- dcov.test(X_hat[, i], X_hat[, j], index = 0.001, R = 1000)
+      # computing the correlation between the companies i and j
+      p <- dist_test$p.value
+      #print (p)
+      p_matr_prova[i,j] <- p
+    }
+    else {
+      p_matr_prova[i,j] <- p_matr_prova[j,i]
+       }
+    }
+  }
+
+
+b <- Sys.time()
+print(b-a)
+
+```
+
+
+```{r}
+adj_matr_cov <- matrix(0, nrow = 55, ncol = 55)
+
+for (i in 1:55){
+  for (j in 1:55){
+    if (p_matr[i,j] > alpha) {
+      adj_matr_cov[i,j] <- 1
+      adj_matr_cov[j,i] <- 1
+    }
+  }
+}
+```
+
+
+```{r}
+
+gr_cov <- drawing_graph(adj_matr_cov)
+V(gr_cov)$color = rep(color_vec, each = 5)
+
+
+plot(gr_cov, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+
+```
+
 
 -----------------------------------------2013-2018----------------------------
 
@@ -331,7 +374,7 @@ require(tseries, quietly = TRUE)
 
 firm_vector2 <- c()
 
-for (firm2 in colnames(X_hat)) try({
+invisible(capture.output (for (firm2 in colnames(X_hat)) try({
   
   hist_quote = suppressWarnings(get.hist.quote(instrument = firm2, start = "2013-01-01", 
                                        end = "2018-01-01", quote = c("Open", "Close"), 
@@ -342,7 +385,7 @@ for (firm2 in colnames(X_hat)) try({
   assign(firm2, hist_quote$trfm_price[-1,])
   firm_vector2 <- c(firm_vector2, firm2)
   
-})
+})))
 ```
 
 
@@ -482,42 +525,6 @@ adj_matr_3 <- generate_adj_matr2(R_hat2, t_alpha2, 0.2)
 adj_matr_4 <- generate_adj_matr2(R_hat2, t_alpha2, 0)
 ```
 
-
-```{r}
-# counting how many 1 in the matrices
-count <- 0
-for (i in 1 : 55){
-  for (j in 1 : 55){
-    if (adj_matr4[i,j] ==1){
-      count <- count + 1
-    }
-  }
-}
-count
-    
-```
-
-
-```{r}
-# defining a palette of colors
-color_vec <- c('cyan3', 'red', 'blue', 'yellow', 'pink', 'chocolate1', 'aquamarine', 'green', 'burlywood1', 'cornsilk3', 'grey')
-
-# define the GICS sectors vector
-GICS_sec <- c('Communication Service', 'Consumer Discretionary', 'Consumer Staples', 'Energy', 'Financials', 'Health Care', 'Industrials', 'Information Technology', 'Materials', 'Real Estate', 'Utilities')
-
-```
-
-
-```{r}
-# drawing undirected graph
-
-drawing_graph <- function(adj_matr){
-  
-  return(graph_from_adjacency_matrix(adj_matr, mode = "undirected", diag = FALSE, weighted = TRUE))
-  
-}
-
-```
 
 
 ```{r}
