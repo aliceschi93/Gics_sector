@@ -6,7 +6,7 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+# Analysis on the dependency among stocks
 
 These are the libraries we need.
 
@@ -86,6 +86,7 @@ merge <- merge[ ,colSums(is.na(merge)) == 0]
 We want to work with the companies and their corresponding *'GICS sector'* so, applying the *group_by* function, we can take a sample of five companies per sector, thus we have *55* firms and *11* sectors: 'Communication Service', 'Consumer Discretionary', 'Consumer Staples', 'Energy', 'Financials', 'Health Care', 'Industrials', 'Information Technology', 'Materials', 'Real Estate', 'Utilities'.
 
 ```{r}
+set.seed(42); 
 samp_symbols <- sp_500_wiki[sp_500_wiki$Symbol %in% colnames(merge),] %>%
   # we want a sample of 5 companies for each sector
   group_by(`GICS Sector`) %>%
@@ -122,6 +123,8 @@ return(R_hat)
 R_hat = generate_corr_matr(X_hat, R_hat)
 
 ```
+
+## Bootstrap procedure
 
 Now we want to implement the bootstrap procedure on *X_{hat}* by (randomly) choosing rows from it. In order to make this process faster we decided to use the *foreach* parallelization scheme. We want *1000* replicates and again apply the *generate_corr_matr* function to get the correlation matrices. Finally we can compute the maximum of the distance $\Delta_b$ between *R_hat* and the boostraped replicates:
 
@@ -183,6 +186,8 @@ plot(F_hat_P, main = "ECDF")
 
 ```
 
+## Plotting the graphs
+
 Now we can build the adjacency matrix. In order to do this we take the confidence level to use its link with statistical tests: in detail the null hypothesis $H_0$ says that there is no edge {i,j} while the alternative one $H_1$ says that there's and edge ${i,j}$.
 
 ```{r}
@@ -197,10 +202,9 @@ t_alpha
 
 ```
 
-So we're ready to fill the adjacency matrix: we define a value of $\epsilon$ and see wheter it's in the confidence interval or outside. More to the point we put an edge when $|\rho|\geq \epsilon$, i.e. when $\rho \not \in [-\epsilon, \epsilon]$. Starting from $\epsilon = 0$, we put an edge if the CI doesn't contain the $0$ and then we repeat the analysis for $\epsilon = (0.35, 0.3, 0.25, 0.5)$.
+So we're ready to fill the adjacency matrix: we define a value of $\epsilon$ and see wheter it's in the confidence interval or not. More to the point we put an edge when $|\rho|\geq \epsilon$, i.e. when $\rho \not \in [-\epsilon, \epsilon]$. Starting from $\epsilon = 0$, we put an edge if the CI doesn't contain the $0$ and then we repeat the analysis for $\epsilon = (0.35, 0.3, 0.25, 0.5)$.
 
 ```{r}
-# adjacency matrix
 new_cor_matr  <- matrix(0, nrow = 55, ncol = 55)
 
 generate_adj_matr = function(R_hat, t_alpha, epsilon){
@@ -251,8 +255,6 @@ GICS_sec <- c('Communication Service', 'Consumer Discretionary', 'Consumer Stapl
 
 
 ```{r}
-# drawing undirected graph
-
 drawing_graph <- function(adj_matr){
   
   return(graph_from_adjacency_matrix(adj_matr, mode = "undirected", diag = FALSE, weighted = TRUE))
@@ -308,14 +310,15 @@ At the end we can see that given $\epsilon = 0$ the adjacency matrix is composed
 
 ## Distance correlation
 
+At this point we want to build a marginal correlation graph based on the distance covariance $\gamma^2$. 
+Using the package energy is possible to perform the test with $R = 1000$ number of replicates and choosing the exponent on Euclidean distance equal to $0,001$.
 ```{r}
-# distance covariance test 
 a <- Sys.time()
 p_matr <- matrix(NA, nrow = 55, ncol = 55)
 for (i in 1:55){
   for (j in 1:55){
     if (j >= i){
-      dcov_test <- dcov.test(X_hat[, i], X_hat[, j], index = 0.001, R = 1000)
+      dcov_test <- dcov.test(X_hat[, i], X_hat[, j], index = 0.001, R = 300)
       p <- dcov_test$p.value
       p_matr[i,j] <- p
     }
@@ -330,13 +333,19 @@ b <- Sys.time()
 print(b-a)
 ```
 
+We take $\alpha_1 = 0.05$ and then, we calculate a new value of $\alpha$ with the Bonferroni correction: $\alpha_2 = \frac{\alpha_1}{ \frac{55*54}{2}}$, where the denominator is the number of possible combinations between two firms.
+```{r}
+alpha1 <- 0.05
+alpha2 <- 0.05/(55*54/2)
+```
+
 
 ```{r}
 adj_matr_cov <- matrix(0, nrow = 55, ncol = 55)
 
 for (i in 1:55){
   for (j in 1:55){
-    if (p_matr[i,j] < alpha) {
+    if (p_matr[i,j] < alpha1) {
       adj_matr_cov[i,j] <- 1
       adj_matr_cov[j,i] <- 1
     }
@@ -344,7 +353,10 @@ for (i in 1:55){
 }
 ```
 
-
+This first graph shows that there are non-linear correlations:
+- The graph is connected
+- Firms from the same sector tend to cluster together again
+- It's also shown that there are no more isolated nodes
 
 ```{r}
 
@@ -354,14 +366,36 @@ V(gr_cov)$color = rep(color_vec, each = 5)
 
 plot(gr_cov, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
 legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
-
 ```
 
+We expect that the Bonferroni correction is a really tight bound.
 
------------------------------------------2013-2018----------------------------
+```{r}
+adj_matr_cov2 <- matrix(0, nrow = 55, ncol = 55)
+
+for (i in 1:55){
+  for (j in 1:55){
+    if (p_matr[i,j] < alpha2) {
+      adj_matr_cov2[i,j] <- 1
+      adj_matr_cov2[j,i] <- 1
+    }
+  }
+}
+```
+As we expected the nodes are all isolated.
+
+```{r}
+gr_cov2 <- drawing_graph(adj_matr_cov2)
+V(gr_cov2)$color = rep(color_vec, each = 5)
 
 
+plot(gr_cov2, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+```
 
+##Repeating the analysis for the period 2013-2018
+
+Here we want to repeat the analysis for the period after the financial crisis for the same firms already considered.
 
 ```{r}
 require(tseries, quietly = TRUE)
@@ -382,8 +416,6 @@ invisible(capture.output (for (firm2 in colnames(X_hat)) try({
 })))
 ```
 
-
-
 ```{r}
 merging2 <- lapply(firm_vector2, get)
 merge2  = do.call('merge', merging2)
@@ -392,14 +424,11 @@ names(merge2) = firm_vector2
 merge2 <- merge2[ ,colSums(is.na(merge2)) == 0]
 ```
 
-
-
 ```{r}
 symbols <- samp_symbols$Symbol
 
 X_hat2 <- merge2[, symbols]
 ```
-
 
 ## Computing correlation matrix
 
@@ -408,9 +437,9 @@ X_hat2 <- merge2[, symbols]
 R_hat2 = matrix(NA, nrow = 55, ncol = 55)
 
 R_hat2 = generate_corr_matr(X_hat2, R_hat2)
-
 ```
 
+## Bootstrap procedure
 
 ```{r}
 num_cores <- detectCores() 
@@ -449,30 +478,21 @@ stopCluster(cl)
 b <- Sys.time()
 
 print(b-a)
-
 ```
-
-
-
 
 ```{r}
 
 F_hat_P2 = ecdf(delta_P2)
 
 plot(F_hat_P2, main = "ECDF")
-
 ```
-
-
 
 ```{r}
 alpha = 0.05
-# Bootstrap / Normal CI / 95%
 inv2 <- inverse(F_hat_P2, 0, 25718774)
 t_alpha2 <- inv(1-alpha)
 t_alpha2
 ```
-
 
 ```{r}
 # adjacency matrix
@@ -511,8 +531,6 @@ adj_matr_3 <- generate_adj_matr2(R_hat2, t_alpha2, 0.2)
 adj_matr_4 <- generate_adj_matr2(R_hat2, t_alpha2, 0)
 ```
 
-
-
 ```{r}
 
 gr_ <- drawing_graph(adj_matr_)
@@ -550,11 +568,10 @@ legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
 
 With respect to the years before the financial crisis we can observe that:
 - Energy, Materials and Utilities sectors mantain the same clustering trend;
-- Financials, Industrial and Real Estate cluster with each other starting from the highest $\epsilon$ value; 
-- Consumer Discretionary, Consumer Staples, Health Care and Information Technology have again isolated nodes starting from the highest $\epsilon$ value. 
+- Financials, Industrial and Real Estate cluster with each other starting from the highest $\epsilon$ value;
+- Consumer Discretionary, Consumer Staples, Health Care and Information Technology have again isolated nodes starting from the highest $\epsilon$ value.
 
-The biggest difference we notice between the two time windows is that there are more correlations among different sectors using high values of $\epsilon$ ($0.35$, $0.3$). Furthermore we can see that sectors such as Energy and Information Technology didn't follow the trends of the other sectors in the first period taken into account, but after the financial crisis they cluster with other firms of different branches. 
-
+The biggest difference we notice between the two time windows is that there are more correlations among different sectors using high values of $\epsilon$ ($0.35$, $0.3$). Furthermore we can see that sectors such as Energy and Information Technology didn't follow the trends of the other sectors in the first period taken into account, but after the financial crisis they cluster with other firms of different branches.
 
 ```{r}
 # distance covariance test 
@@ -563,10 +580,8 @@ p_matr_new <- matrix(NA, nrow = 55, ncol = 55)
 for (i in 1:55){
   for (j in 1:55){
     if (j >= i){
-      dcov_test <- dcov.test(X_hat[, i], X_hat[, j], index = 0.001, R = 1000)
-      # computing the correlation between the companies i and j
+      dcov_test <- dcov.test(X_hat[, i], X_hat[, j], index = 0.001, R = 300)
       p <- dcov_test$p.value
-      #print (p)
       p_matr_new[i,j] <- p
     }
     else {
@@ -580,30 +595,59 @@ b <- Sys.time()
 print(b-a)
 ```
 
+```{r}
+alpha1 <- 0.05
+alpha2 <- 0.05/(55*54/2)
+```
 
 ```{r}
-adj_matr_cov <- matrix(0, nrow = 55, ncol = 55)
+adj_matr_cov3 <- matrix(0, nrow = 55, ncol = 55)
 
 for (i in 1:55){
   for (j in 1:55){
-    if (p_matr_new[i,j] < alpha) {
-      adj_matr_cov[i,j] <- 1
-      adj_matr_cov[j,i] <- 1
+    if (p_matr_new[i,j] < alpha1) {
+      adj_matr_cov3[i,j] <- 1
+      adj_matr_cov3[j,i] <- 1
     }
   }
 }
 ```
 
-
+In this case we have the same result: the first graph shows non-linear correlations, but with the Bonferroni correction the bound is too tight and the nodes are all isolated.
 
 ```{r}
 
-gr_cov <- drawing_graph(adj_matr_cov)
-V(gr_cov)$color = rep(color_vec, each = 5)
+gr_cov3 <- drawing_graph(adj_matr_cov3)
+V(gr_cov3)$color = rep(color_vec, each = 5)
 
 
-plot(gr_cov, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
+plot(gr_cov3, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
 legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
-
 ```
 
+```{r}
+adj_matr_cov4 <- matrix(0, nrow = 55, ncol = 55)
+
+for (i in 1:55){
+  for (j in 1:55){
+    if (p_matr_new[i,j] < alpha2) {
+      adj_matr_cov4[i,j] <- 1
+      adj_matr_cov4[j,i] <- 1
+    }
+  }
+}
+```
+
+```{r}
+
+gr_cov4 <- drawing_graph(adj_matr_cov4)
+V(gr_cov4)$color = rep(color_vec, each = 5)
+
+
+plot(gr_cov4, edge.arrow.size = 5, vertex.size = 12, vertex.label = NA, vertex.label.dist = 2,  edge.width = 1.5)
+legend(x = "topleft", GICS_sec, col = color_vec, pch = 16, bty = "n", cex = 0.7)
+```
+
+### Collaboration with:
+- Giorgio Zannini Quirini and Daniele Sanna
+- Maria Luisa Croci and Valerio Antonini
